@@ -1,0 +1,5 @@
+2025-05-01 12:54:22,536 - ERROR - Failed to parse availableOptions: [{'name': 'Size', 'position': 1, 'values': array(['One size'], dtype=object)}]
+Error: Expecting value: line 1 column 44 (char 43)
+2025-05-01 12:54:23,314 - INFO - Successfully pushed ID: a08tzwq02r0exwqu3m50b6iu
+2025-05-01 12:58:58,327 - Invalid availableOptions: [{'name': 'Size', 'position': 1, 'values': array(['One size'], dtype=object)}] | Error: Expecting value: line 1 column 44 (char 43)
+2025-05-01 13:03:03,215 - Invalid availableOptions: [{'name': 'Size', 'position': 1, 'values': [['One size'], dtype=object]}] | Error: invalid syntax. Maybe you meant '==' or ':=' instead of '='? (<unknown>, line 1)
