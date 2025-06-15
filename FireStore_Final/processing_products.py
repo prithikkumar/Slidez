@@ -7,8 +7,8 @@ from tqdm import tqdm
 from datetime import datetime, UTC
 from typing import List, Dict, Any, Optional
 
-INPUT_FILE = r'C:\Users\prith\OneDrive\Desktop\Slidez\FireStorePush\FireStore_Final\Raw_Data\products.jsonl'  # Your input
-OUTPUT_FILE = "Output/products_processed.jsonl"
+INPUT_FILE = r'C:\Users\prith\OneDrive\Desktop\Slidez\FireStorePush\Processed_Input\Products_Final\products.jsonl'  # Your input
+OUTPUT_FILE = r'C:\Users\prith\OneDrive\Desktop\Slidez\FireStorePush\Output_FireStore\products_final.jsonl'
 os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
 
 # ===== Helper Functions =====
