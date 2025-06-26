@@ -1,24 +1,29 @@
 import pandas as pd
-import asyncio
 import aiohttp
-import os
-import json
+import asyncio
 import aiofiles
+import json
+import os
+import logging
 from tqdm.asyncio import tqdm
-from collections import defaultdict, deque
 from datetime import datetime
+from collections import defaultdict
 
 # === Config ===
-INPUT_FILE = r'C:\Users\prith\OneDrive\Desktop\Slidez\FireStorePush\Raw_Data_Input\Slidez_products_excel.csv'
-OUTPUT_JSONL = "Raw_Data/products.jsonl"
+INPUT_XLSX = r'C:\Users\prith\OneDrive\Desktop\Slidez\FireStorePush\Raw_Data_Input\Slidez_products_excel.csv'
+OUTPUT_JSONL = "Raw_Data/fetched_products.jsonl"
 MISSING_JSONL = "Raw_Data/missing_products.jsonl"
-INCOMPLETE_JSON = "Raw_Data/incomplete_products.json"
-BATCH_SIZE = 100
+SUMMARY_LOG = "Raw_Data/fetch_summary.log"
+BATCH_SIZE = 25
 MAX_RETRIES = 3
-CONCURRENT_REQUESTS = 20
-# MAX_PRODUCTS = 99
+CONCURRENT_WORKERS = 10
 
 GRAPHQL_URL = 'https://api.getcarro.com/graphql'
+HEADERS = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6Im5JNVZmby1SVG5nMWNNUm9uZ0t2VSJ9.eyJtb2duZXQvYXNzb2NpYXRlZF9icmFuZF9pZCI6Im1reDBsMWprejIxdHNzNTRobnE1NHo0ZSIsImlzcyI6Imh0dHBzOi8vdnlybC51cy5hdXRoMC5jb20vIiwic3ViIjoiNHJVbFR5MkJVYnNXNTAxOVdRVW43Q3hyZDlLZUR1SDBAY2xpZW50cyIsImF1ZCI6InVybjpjYXJyby1wbGF0Zm9ybSIsImlhdCI6MTc0OTAwMzk0MSwiZXhwIjoxNzUxNTk1OTQxLCJzY29wZSI6InJlYWQ6ZGlyZWN0b3J5IHJlYWQ6cHJvZHVjdHMgd3JpdGU6cHJvZHVjdHMgcmVhZDpkb2NzIGNyZWF0ZTp1c2VycyByZWFkOm9yZGVycyB3cml0ZTpvcmRlcnMiLCJndHkiOiJjbGllbnQtY3JlZGVudGlhbHMiLCJhenAiOiI0clVsVHkyQlVic1c1MDE5V1FVbjdDeHJkOUtlRHVIMCIsInBlcm1pc3Npb25zIjpbInJlYWQ6ZGlyZWN0b3J5IiwicmVhZDpwcm9kdWN0cyIsIndyaXRlOnByb2R1Y3RzIiwicmVhZDpkb2NzIiwiY3JlYXRlOnVzZXJzIiwicmVhZDpvcmRlcnMiLCJ3cml0ZTpvcmRlcnMiXX0.ie7LB6n7TwBl0yzpK6B6NpP-Vc8B6_X4k6xPogz1XhHXbIuuv0m3wcJ1hOaSwH1Hkkn3FZVOUvzgdh-_KHzwjgtfunQu7s0HQ7-5NJxwU7iC-cGcJSnh4gDoHDGNbAnyYI7EXVNbIUSiRW8EQucYGwJdDsOE3d1StvHInRo5_nqdpSq_g6OeOfc3k8X7Ja5tYWR9XgnlEM3KUi0o5mPbx_7dkBC_3hH3_TPONZ6fg78V9AGsh9Qg7QHH9haCVqK2CxC1LEOjeItgGN4gV4BPLeEG6coyq9IzDBKYsfNyeecfdQzoWDCFGJ6vdMUf5vRbFPmuo3A67LggBKG8Fu1ZVw'  # Replace with actual token
+}
+
 GRAPHQL_QUERY = """query ($productIds: [ID!], $first: Int!) {
   products(productIds: $productIds, first: $first) {
     edges {
@@ -59,160 +64,153 @@ GRAPHQL_QUERY = """query ($productIds: [ID!], $first: Int!) {
   }
 }"""
 
-HEADERS = {
-    'Content-Type': 'application/json',
-    'Authorization': 'Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6Im5JNVZmby1SVG5nMWNNUm9uZ0t2VSJ9.eyJtb2duZXQvYXNzb2NpYXRlZF9icmFuZF9pZCI6Im1reDBsMWprejIxdHNzNTRobnE1NHo0ZSIsImlzcyI6Imh0dHBzOi8vdnlybC51cy5hdXRoMC5jb20vIiwic3ViIjoiNHJVbFR5MkJVYnNXNTAxOVdRVW43Q3hyZDlLZUR1SDBAY2xpZW50cyIsImF1ZCI6InVybjpjYXJyby1wbGF0Zm9ybSIsImlhdCI6MTc0OTAwMzk0MSwiZXhwIjoxNzUxNTk1OTQxLCJzY29wZSI6InJlYWQ6ZGlyZWN0b3J5IHJlYWQ6cHJvZHVjdHMgd3JpdGU6cHJvZHVjdHMgcmVhZDpkb2NzIGNyZWF0ZTp1c2VycyByZWFkOm9yZGVycyB3cml0ZTpvcmRlcnMiLCJndHkiOiJjbGllbnQtY3JlZGVudGlhbHMiLCJhenAiOiI0clVsVHkyQlVic1c1MDE5V1FVbjdDeHJkOUtlRHVIMCIsInBlcm1pc3Npb25zIjpbInJlYWQ6ZGlyZWN0b3J5IiwicmVhZDpwcm9kdWN0cyIsIndyaXRlOnByb2R1Y3RzIiwicmVhZDpkb2NzIiwiY3JlYXRlOnVzZXJzIiwicmVhZDpvcmRlcnMiLCJ3cml0ZTpvcmRlcnMiXX0.ie7LB6n7TwBl0yzpK6B6NpP-Vc8B6_X4k6xPogz1XhHXbIuuv0m3wcJ1hOaSwH1Hkkn3FZVOUvzgdh-_KHzwjgtfunQu7s0HQ7-5NJxwU7iC-cGcJSnh4gDoHDGNbAnyYI7EXVNbIUSiRW8EQucYGwJdDsOE3d1StvHInRo5_nqdpSq_g6OeOfc3k8X7Ja5tYWR9XgnlEM3KUi0o5mPbx_7dkBC_3hH3_TPONZ6fg78V9AGsh9Qg7QHH9haCVqK2CxC1LEOjeItgGN4gV4BPLeEG6coyq9IzDBKYsfNyeecfdQzoWDCFGJ6vdMUf5vRbFPmuo3A67LggBKG8Fu1ZVw'
-}
-
 os.makedirs(os.path.dirname(OUTPUT_JSONL), exist_ok=True)
 
-# === Dynamic Missing Field Checker ===
-def find_missing_fields(data, prefix=''):
-    missing_fields = []
-    missing_values = {}
-    if isinstance(data, dict):
-        for k, v in data.items():
-            path = f"{prefix}.{k}" if prefix else k
-            if v in [None, '', [], {}, float('nan')]:
-                missing_fields.append(path)
-                # Save only the missing value
-                missing_values.setdefault(prefix, {})[k] = v
-            elif isinstance(v, (dict, list)):
-                sub_fields, sub_values = find_missing_fields(v, path)
-                missing_fields.extend(sub_fields)
-                if sub_values:
-                    missing_values.setdefault(k, {}).update(sub_values)
-    elif isinstance(data, list):
-        for i, item in enumerate(data):
-            path = f"{prefix}[{i}]"
-            if item in [None, '', [], {}, float('nan')]:
-                missing_fields.append(path)
-                missing_values[path] = item
-            elif isinstance(item, (dict, list)):
-                sub_fields, sub_values = find_missing_fields(item, path)
-                missing_fields.extend(sub_fields)
-                if sub_values:
-                    missing_values.setdefault(path, {}).update(sub_values)
-    return missing_fields, missing_values
+# === Logging Setup ===
+logging.basicConfig(
+    filename=SUMMARY_LOG,
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
-# === Flush JSONL ===
-async def flush_to_jsonl(buffer, path, lock):
-    async with lock:
-        if not buffer:
-            return
-        async with aiofiles.open(path, 'a', encoding='utf-8') as f:
-            while buffer:
-                await f.write(json.dumps(buffer.popleft(), ensure_ascii=False) + '\n')
+# === JSONL Writer ===
+async def write_jsonl(records, path):
+    async with aiofiles.open(path, 'a', encoding='utf-8') as f:
+        for rec in records:
+            await f.write(json.dumps(rec, ensure_ascii=False) + '\n')
 
-# === Flush JSON ===
-async def flush_to_json(buffer, path, lock):
-    async with lock:
-        if not buffer:
-            return
-        async with aiofiles.open(path, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps(buffer, ensure_ascii=False, indent=2))
-
-# === Fetch Product ===
-async def fetch_product(session, product_id):
+# === GraphQL Fetch Function ===
+async def fetch_batch(session, batch):
     payload = {
         'query': GRAPHQL_QUERY,
-        'variables': {'productIds': [product_id], 'first': 1}
+        'variables': {
+            'productIds': batch,
+            'first': min(len(batch), 25)
+        }
     }
     try:
-        async with session.post(GRAPHQL_URL, headers=HEADERS, json=payload, timeout=20) as response:
-            result = await response.json()
-            if 'errors' in result:
-                return None, f"GraphQL Error: {result['errors'][0].get('message', 'Unknown')}"
-            edges = result.get('data', {}).get('products', {}).get('edges', [])
-            if not edges:
-                return None, "No product found"
-            return edges[0]['node'], None
+        async with session.post(GRAPHQL_URL, headers=HEADERS, json=payload, timeout=60) as resp:
+            return await resp.json()
     except Exception as e:
-        return None, str(e)
+        return {"error": str(e)}
 
-# === Worker Task ===
-async def worker(queue, session, pbar):
+# === Worker ===
+async def worker(queue, session, success_records, missing_records, retries, processed_ids, pbar):
     while True:
         try:
-            product_id = await queue.get()
+            batch = await queue.get()
         except asyncio.CancelledError:
             break
 
-        product, error = await fetch_product(session, product_id)
+        result = await fetch_batch(session, batch)
+        found_ids = set()
 
-        if product:
-            missing_fields, missing_values = find_missing_fields(product)
+        if "error" in result:
+            error_msg = result["error"]
+            for pid in batch:
+                if pid not in processed_ids:
+                    retries[pid] += 1
+                    if retries[pid] <= MAX_RETRIES:
+                        await queue.put([pid])
+                    else:
+                        missing_records.append({
+                            "product_id": pid,
+                            "reason": error_msg,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        processed_ids.add(pid)
+                        pbar.update(1)
 
-            if missing_fields:
-                async with incomplete_lock:
-                    incomplete_list.append({
-                        "product_id": product_id,
-                        "missing_fields": missing_fields,
-                        "missing_values": missing_values
-                    })
-
-            async with product_lock:
-                product_buffer.append(product)
-                if len(product_buffer) >= BATCH_SIZE:
-                    await flush_to_jsonl(product_buffer, OUTPUT_JSONL, product_lock)
+        elif "errors" in result:
+            error_msg = result["errors"][0].get("message", "GraphQL error")
+            for pid in batch:
+                if pid not in processed_ids:
+                    retries[pid] += 1
+                    if retries[pid] <= MAX_RETRIES:
+                        await queue.put([pid])
+                    else:
+                        missing_records.append({
+                            "product_id": pid,
+                            "reason": error_msg,
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        processed_ids.add(pid)
+                        pbar.update(1)
 
         else:
-            retry_counts[product_id] += 1
-            if retry_counts[product_id] <= MAX_RETRIES:
-                await queue.put(product_id)
-            else:
-                async with missing_lock:
-                    missing_buffer.append({
-                        "product_id": product_id,
-                        "reason": error,
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
-                    if len(missing_buffer) >= BATCH_SIZE:
-                        await flush_to_jsonl(missing_buffer, MISSING_JSONL, missing_lock)
+            edges = result.get("data", {}).get("products", {}).get("edges", [])
+            for edge in edges:
+                product = edge["node"]
+                pid = product["id"]
+                if pid not in processed_ids:
+                    success_records.append(product)
+                    processed_ids.add(pid)
+                    pbar.update(1)
+                    found_ids.add(pid)
 
-        pbar.update(1)
+            for pid in batch:
+                if pid not in found_ids and pid not in processed_ids:
+                    retries[pid] += 1
+                    if retries[pid] <= MAX_RETRIES:
+                        await queue.put([pid])
+                    else:
+                        missing_records.append({
+                            "product_id": pid,
+                            "reason": "Not returned in edges",
+                            "timestamp": datetime.utcnow().isoformat()
+                        })
+                        processed_ids.add(pid)
+                        pbar.update(1)
+
         queue.task_done()
 
-# === Main Runner ===
-async def main():
-    try:
-        df = pd.read_csv(INPUT_FILE)
-        df.columns = df.columns.str.strip().str.lower()
-    except Exception as e:
-        raise RuntimeError(f"Failed to load input file: {e}")
-
-    if 'retailer_product_id' not in df.columns:
-        raise ValueError("Missing 'id' column")
-
-    product_ids = df['retailer_product_id'].dropna().astype(str).unique().tolist()
-
+# === Main Fetch Logic ===
+async def fetch_all_products(product_ids):
     queue = asyncio.Queue()
-    for pid in product_ids:
-        await queue.put(pid)
+    success_records = []
+    missing_records = []
+    retries = defaultdict(int)
+    processed_ids = set()
+
+    unique_ids = list(set(product_ids))
+    for i in range(0, len(unique_ids), BATCH_SIZE):
+        await queue.put(unique_ids[i:i+BATCH_SIZE])
 
     async with aiohttp.ClientSession() as session:
-        pbar = tqdm(total=len(product_ids), desc="🚀 Fetching", ncols=100)
-        workers = [asyncio.create_task(worker(queue, session, pbar)) for _ in range(CONCURRENT_REQUESTS)]
+        pbar = tqdm(total=len(unique_ids), desc="📦 Fetching Products", ncols=100)
+        workers = [
+            asyncio.create_task(worker(queue, session, success_records, missing_records, retries, processed_ids, pbar))
+            for _ in range(CONCURRENT_WORKERS)
+        ]
         await queue.join()
         for w in workers:
             w.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
         pbar.close()
 
-    await flush_to_jsonl(product_buffer, OUTPUT_JSONL, product_lock)
-    await flush_to_jsonl(missing_buffer, MISSING_JSONL, missing_lock)
-    await flush_to_json(incomplete_list, INCOMPLETE_JSON, incomplete_lock)
+    await write_jsonl(success_records, OUTPUT_JSONL)
+    await write_jsonl(missing_records, MISSING_JSONL)
 
-# === Shared Buffers and Locks ===
-product_buffer = deque()
-missing_buffer = deque()
-incomplete_list = []
-product_lock = asyncio.Lock()
-missing_lock = asyncio.Lock()
-incomplete_lock = asyncio.Lock()
-retry_counts = defaultdict(int)
+    logging.info("=== ✅ Fetch Summary ===")
+    logging.info(f"Total requested:      {len(unique_ids)}")
+    logging.info(f"Successfully fetched: {len(success_records)}")
+    logging.info(f"Missing / Failed:     {len(missing_records)}")
+    logging.info(f"✅ Saved to:           {OUTPUT_JSONL}")
+    logging.info(f"⚠️  Missing saved to:  {MISSING_JSONL}")
 
 # === Entrypoint ===
+def main():
+    try:
+        df = pd.read_csv(INPUT_XLSX)
+        df.columns = df.columns.str.strip().str.lower()
+        if "retailer_product_id" not in df.columns:
+            raise ValueError("Missing 'retailer_product_id' column")
+
+        product_ids = df['retailer_product_id'].dropna().astype(str).unique().tolist()
+        asyncio.run(fetch_all_products(product_ids))
+
+    except Exception as e:
+        logging.error(f"❌ Error: {str(e)}")
+
 if __name__ == "__main__":
-    asyncio.run(main())
-    print("✅ All tasks completed.")
+    main()
